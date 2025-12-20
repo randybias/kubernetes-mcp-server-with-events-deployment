@@ -1,76 +1,73 @@
-# kubernetes-mcp-server-with-events on k0s (deployment)
+# Deploy `kubernetes-mcp-server-with-events` on a k0s cluster
 
-Deploy `ghcr.io/randybias/kubernetes-mcp-server-with-events` into a k0s Kubernetes cluster using the upstream `kubernetes-mcp-server` Helm chart, with:
-- in-cluster auth (ServiceAccount + RBAC)
-- its own namespace (`mcp-system`)
-- NodePort exposure (so a laptop can reach it over WireGuard/VPN)
-- repeatable `up` / `down` scripts
+This repo contains a minimal, repeatable way to deploy `ghcr.io/randybias/kubernetes-mcp-server-with-events` into a Kubernetes cluster (k0s tested) using the upstream Helm chart `oci://ghcr.io/containers/charts/kubernetes-mcp-server`.
 
-This repo intentionally keeps things simple: no Istio, no ingress, no external auth on the MCP server.
+It creates:
+- Namespace: `mcp-system`
+- ServiceAccount + RBAC for in-cluster auth
+- A `NodePort` Service so you can reach it from a laptop over VPN/WireGuard
 
-## Prerequisites (on the k0s node or any admin host)
-- `kubectl` configured with admin access to the cluster
-- `helm` (v3+)
-- Network access from cluster nodes to pull images from GHCR
+No Istio, no ingress, no auth gateway.
 
-## Files
-- `mcp-k8s-up`: idempotent install/upgrade (RBAC + Helm deploy)
+## Contents
+- `mcp-k8s-up`: idempotent setup (RBAC + Helm install/upgrade)
 - `mcp-k8s-down`: idempotent teardown (Helm uninstall + RBAC cleanup)
-- `mcp-system-rbac.yaml`: namespace + ServiceAccount + RBAC (includes Nodes read for `faults` mode)
-- `k0s-kubernetes-mcp-server-dev-plan.md`: session notes, decisions, and follow-ups
+- `mcp-system-rbac.yaml`: the manifests applied by the scripts
 
-## Quick start
+## Prerequisites (run from the k0s node or any admin host)
+- `kubectl` configured to talk to the cluster (admin creds)
+- `helm` installed
+- Cluster nodes can pull images from GHCR
 
-1) Decide the image tag you want to deploy
+## Deploy
 
-Example:
+1) Choose the image
 ```bash
 IMAGE=ghcr.io/randybias/kubernetes-mcp-server-with-events:dev-latest
 ```
 
-2) Run the deployment script
-
-Pass the WireGuard/VPN-reachable node IP so it prints a URL you can use from your laptop:
+2) Run setup
 ```bash
 ./mcp-k8s-up --image "$IMAGE" --node-ip <WIREGUARD_NODE_IP>
 ```
 
-The script:
-- applies `mcp-system-rbac.yaml`
-- installs/upgrades the upstream Helm chart `oci://ghcr.io/containers/charts/kubernetes-mcp-server`
-- exposes the service as `type: NodePort` (Kubernetes auto-assigns a random nodePort)
-- prints the assigned NodePort and a laptop URL
+What it does:
+- `kubectl apply -f mcp-system-rbac.yaml`
+- `helm upgrade --install kubernetes-mcp-server oci://ghcr.io/containers/charts/kubernetes-mcp-server -n mcp-system ...`
+- sets `service.type=NodePort` (Kubernetes auto-assigns a random nodePort)
+- prints:
+  - the assigned NodePort
+  - a laptop URL like `http://<WIREGUARD_NODE_IP>:<NODEPORT>`
 
 3) Connect from your laptop
+- MCP base URL: `http://<WIREGUARD_NODE_IP>:<NODEPORT>/mcp`
+- Health check: `http://<WIREGUARD_NODE_IP>:<NODEPORT>/healthz`
 
-Use the printed URL and connect MCP Inspector to:
-```text
-http://<WIREGUARD_NODE_IP>:<NODEPORT>/mcp
-```
+## Important knobs
 
-If you use event subscriptions, run `logging/setLevel` in the client and then call the `events_subscribe` tool (the server delivers notifications via `notifications/message`).
+### `--app-port` (internal server port)
+The upstream chart uses `.Values.service.port` for:
+- container `containerPort`
+- Service port
+- liveness/readiness probes (to `/healthz`)
 
-## Configuration knobs
+This repo defaults to `--app-port 8080` because the `kubernetes-mcp-server-with-events` image listens on `8080` in-cluster.
 
-### Service port vs NodePort (important)
-- The chart uses `.Values.service.port` for **containerPort**, **Service port**, and health probes.
-- The script defaults `--app-port 8080` because this image listens on `8080` in-cluster.
-
-If you *know* your image listens on a different internal port, override:
+If your image listens on a different port:
 ```bash
 ./mcp-k8s-up --image "$IMAGE" --node-ip <WIREGUARD_NODE_IP> --app-port 8686
 ```
 
-The externally reachable port is the **NodePort** that Kubernetes assigns (printed by the script).
+The laptop-facing port remains the Service **NodePort** (auto-assigned and printed).
 
-### RBAC
-`mcp-system-rbac.yaml` grants:
-- cluster-wide read via built-in `view` (broad; tighten later if desired)
-- read-only access to Helm release storage (`secrets`, `configmaps`) across all namespaces
-- `nodes get/list/watch` so `events_subscribe` `mode=faults` works (fault detection watches Nodes)
+### RBAC (`mcp-system-rbac.yaml`)
+This grants (broad for now):
+- `ClusterRoleBinding` to built-in `view` (cluster-wide read)
+- Helm release storage read: `secrets` and `configmaps` (`get/list/watch`) across all namespaces
+- Nodes read (`nodes get/list/watch`) required for `events_subscribe` with `mode: faults`
 
-## Teardown
-Remove the Helm release and RBAC:
+## Tear down
+Remove the Helm release and RBAC objects:
 ```bash
 ./mcp-k8s-down
 ```
@@ -80,20 +77,24 @@ Remove everything including the namespace:
 ./mcp-k8s-down --delete-namespace
 ```
 
-## Test: induce CrashLoopBackOff (optional)
-Create a disposable workload that will CrashLoop so you can verify `faults` notifications:
+## Test: trigger a CrashLoopBackOff notification
+
+1) Subscribe in your MCP client:
+- Call `logging/setLevel` (e.g., `debug` or `warning`)
+- Call tool `events_subscribe` with `{"mode":"faults"}`
+
+2) Create a crashing workload:
 ```bash
 kubectl delete ns mcp-test --ignore-not-found
 kubectl create ns mcp-test
 kubectl -n mcp-test create deploy crashy --image=busybox:1.36 -- /bin/sh -c 'sleep 1; exit 1'
 ```
 
-Then subscribe with `events_subscribe` using `mode: faults` and you should receive a `CrashLoop` notification.
+You should receive a `notifications/message` with `faultType: CrashLoop`.
 
 ## Troubleshooting
 
-- **`events_subscribe` doesn’t work in `faults` mode**: confirm Nodes RBAC:
+- `events_subscribe` fails in `faults` mode: verify Nodes RBAC:
   - `kubectl auth can-i --as=system:serviceaccount:mcp-system:kubernetes-mcp-server list nodes`
-- **Pod CrashLooping immediately**: verify the internal listen port matches `--app-port` (probes hit `/healthz` on that port).
-- **No notifications**: ensure the client is using streamable HTTP correctly (long-lived receive stream) and that you’ve called `logging/setLevel`.
-
+- Pod is CrashLooping: your internal server port doesn’t match `--app-port` (probes will fail).
+- You can reach `/healthz` but not MCP: make sure you’re using `/mcp` and the client keeps the receive stream open (streamable HTTP).
