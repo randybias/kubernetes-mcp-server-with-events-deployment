@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./triage-creds-up [options]
+
+Creates/updates the read-only triage ServiceAccount + RBAC and generates a kubeconfig
+file suitable for a remote triage agent (Nightcrier) to use.
+
+Options:
+  --namespace        Namespace containing the triage ServiceAccount (default: mcp-system)
+  --serviceaccount   ServiceAccount name (default: kubernetes-triage-readonly)
+  --kubeconfig-out   Path to write generated kubeconfig (default: ./out/triage-readonly.kubeconfig)
+  --context          Context name in generated kubeconfig (default: triage-readonly)
+  --cluster-name     Cluster name in generated kubeconfig (default: current kubeconfig cluster)
+  --user-name        User name in generated kubeconfig (default: triage-readonly)
+  --server           Kubernetes API server URL (default: current kubeconfig cluster server)
+  --duration         Token duration for kubectl create token (default: 24h)
+  --print            Also print the kubeconfig to stdout
+
+Notes:
+  - Uses TokenRequest via `kubectl create token` (recommended). Token lifetime is limited by apiserver policy.
+  - Reads CA and server from your current kubectl context unless overridden.
+  - Writes the kubeconfig with permissions 0600.
+EOF
+}
+
+namespace="mcp-system"
+serviceaccount="kubernetes-triage-readonly"
+kubeconfig_out="./out/triage-readonly.kubeconfig"
+context_name="triage-readonly"
+cluster_name=""
+user_name="triage-readonly"
+server=""
+duration="24h"
+print="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --namespace) namespace="${2:-}"; shift 2 ;;
+    --serviceaccount) serviceaccount="${2:-}"; shift 2 ;;
+    --kubeconfig-out) kubeconfig_out="${2:-}"; shift 2 ;;
+    --context) context_name="${2:-}"; shift 2 ;;
+    --cluster-name) cluster_name="${2:-}"; shift 2 ;;
+    --user-name) user_name="${2:-}"; shift 2 ;;
+    --server) server="${2:-}"; shift 2 ;;
+    --duration) duration="${2:-}"; shift 2 ;;
+    --print) print="true"; shift 1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "kubectl not found in PATH" >&2
+  exit 1
+fi
+
+if [[ ! -f "./mcp-system-rbac.yaml" ]]; then
+  echo "Expected ./mcp-system-rbac.yaml next to this script" >&2
+  exit 1
+fi
+if [[ ! -f "./triage-rbac.yaml" ]]; then
+  echo "Expected ./triage-rbac.yaml next to this script" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$kubeconfig_out")"
+
+echo "[1/3] Apply triage RBAC"
+kubectl apply -f ./mcp-system-rbac.yaml >/dev/null
+kubectl apply -f ./triage-rbac.yaml >/dev/null
+
+echo "[2/3] Discover cluster CA + server from current kubeconfig"
+current_context="$(kubectl config current-context)"
+current_cluster="$(kubectl config view -o jsonpath="{.contexts[?(@.name==\"$current_context\")].context.cluster}")"
+
+if [[ -z "$cluster_name" ]]; then
+  cluster_name="$current_cluster"
+fi
+
+if [[ -z "$server" ]]; then
+  server="$(kubectl config view -o jsonpath="{.clusters[?(@.name==\"$current_cluster\")].cluster.server}")"
+fi
+
+ca_data="$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name==\"$current_cluster\")].cluster.certificate-authority-data}")"
+if [[ -z "$ca_data" ]]; then
+  ca_file="$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name==\"$current_cluster\")].cluster.certificate-authority}")"
+  if [[ -n "$ca_file" && -f "$ca_file" ]]; then
+    ca_data="$(base64 -w 0 < "$ca_file")"
+  fi
+fi
+
+if [[ -z "$server" || -z "$ca_data" ]]; then
+  echo "Failed to determine cluster server/CA from kubeconfig; pass --server and ensure CA is available in kubeconfig." >&2
+  echo "Detected server='${server}' ca_data_len='${#ca_data}'" >&2
+  exit 1
+fi
+
+echo "[3/3] Mint token and write kubeconfig: ${kubeconfig_out}"
+token="$(kubectl -n "$namespace" create token "$serviceaccount" --duration="$duration")"
+if [[ -z "$token" ]]; then
+  echo "Failed to mint token via kubectl create token" >&2
+  exit 1
+fi
+
+umask 077
+cat >"$kubeconfig_out" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: ${cluster_name}
+  cluster:
+    server: ${server}
+    certificate-authority-data: ${ca_data}
+users:
+- name: ${user_name}
+  user:
+    token: ${token}
+contexts:
+- name: ${context_name}
+  context:
+    cluster: ${cluster_name}
+    user: ${user_name}
+current-context: ${context_name}
+EOF
+
+chmod 600 "$kubeconfig_out" 2>/dev/null || true
+
+echo "Wrote kubeconfig: $kubeconfig_out"
+echo "Preflight:"
+echo "  KUBECONFIG=$kubeconfig_out kubectl auth can-i get pods -A"
+
+if [[ "$print" == "true" ]]; then
+  echo "---"
+  cat "$kubeconfig_out"
+fi
+

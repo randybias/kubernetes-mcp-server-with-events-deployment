@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./triage-creds-down [options]
+
+Removes the triage ServiceAccount + RBAC and (optionally) deletes the generated kubeconfig file.
+
+Options:
+  --namespace        Namespace containing the triage ServiceAccount (default: mcp-system)
+  --kubeconfig-out   Kubeconfig path to delete (default: ./out/triage-readonly.kubeconfig)
+  --keep-file        Do not delete kubeconfig file (default: false)
+
+Notes:
+  - TokenRequest tokens minted earlier naturally expire; this removes the identity + RBAC.
+EOF
+}
+
+namespace="mcp-system"
+kubeconfig_out="./out/triage-readonly.kubeconfig"
+keep_file="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --namespace) namespace="${2:-}"; shift 2 ;;
+    --kubeconfig-out) kubeconfig_out="${2:-}"; shift 2 ;;
+    --keep-file) keep_file="true"; shift 1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "kubectl not found in PATH" >&2
+  exit 1
+fi
+
+if [[ ! -f "./triage-rbac.yaml" ]]; then
+  echo "Expected ./triage-rbac.yaml next to this script" >&2
+  exit 1
+fi
+
+kubectl delete -f ./triage-rbac.yaml --ignore-not-found >/dev/null
+
+if [[ "$keep_file" != "true" ]]; then
+  rm -f "$kubeconfig_out"
+fi
+
+echo "Torn down triage creds (namespace=$namespace)"
+

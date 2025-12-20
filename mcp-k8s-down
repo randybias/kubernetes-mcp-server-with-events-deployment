@@ -10,6 +10,7 @@ Options:
   --namespace         Namespace (default: mcp-system)
   --release           Helm release name (default: kubernetes-mcp-server)
   --delete-namespace  Also delete the namespace (default: false)
+  --keep-triage-file  Do not delete generated triage kubeconfig (default: false)
 
 Notes:
   - Deletes Helm release, then deletes RBAC objects from ./mcp-system-rbac.yaml.
@@ -19,12 +20,14 @@ EOF
 namespace="mcp-system"
 release="kubernetes-mcp-server"
 delete_namespace="false"
+keep_triage_file="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --namespace) namespace="${2:-}"; shift 2 ;;
     --release) release="${2:-}"; shift 2 ;;
     --delete-namespace) delete_namespace="true"; shift 1 ;;
+    --keep-triage-file) keep_triage_file="true"; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -45,6 +48,16 @@ if [[ ! -f "./mcp-system-rbac.yaml" ]]; then
 fi
 
 helm uninstall "$release" -n "$namespace" >/dev/null 2>&1 || true
+
+# Remove triage credentials + kubeconfig first (so deletion doesn't depend on namespace removal order).
+if [[ -x "./triage-creds-down" ]]; then
+  triage_args=()
+  if [[ "$keep_triage_file" == "true" ]]; then
+    triage_args+=(--keep-file)
+  fi
+  ./triage-creds-down "${triage_args[@]}" >/dev/null || true
+fi
+
 kubectl delete -f ./mcp-system-rbac.yaml --ignore-not-found >/dev/null
 
 if [[ "$delete_namespace" == "true" ]]; then
@@ -52,4 +65,3 @@ if [[ "$delete_namespace" == "true" ]]; then
 fi
 
 echo "Torn down: release=${namespace}/${release}"
-

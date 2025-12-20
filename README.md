@@ -15,6 +15,9 @@ No Istio, no ingress, no auth gateway.
 - `mcp-k8s-up`: idempotent setup (RBAC + Helm install/upgrade)
 - `mcp-k8s-down`: idempotent teardown (Helm uninstall + RBAC cleanup)
 - `mcp-system-rbac.yaml`: the manifests applied by the scripts
+- `triage-creds-up`: generate a read-only triage kubeconfig for Nightcrier
+- `triage-creds-down`: remove triage SA/RBAC and delete the generated kubeconfig
+- `triage-rbac.yaml`: triage ServiceAccount + RBAC
 
 ## Prerequisites (run from the k0s node or any admin host)
 - `kubectl` configured to talk to the cluster (admin creds)
@@ -44,6 +47,29 @@ What it does:
 3) Connect from your laptop
 - MCP base URL: `http://<WIREGUARD_NODE_IP>:<NODEPORT>/mcp`
 - Health check: `http://<WIREGUARD_NODE_IP>:<NODEPORT>/healthz`
+
+## Remote triage agent credentials (Nightcrier)
+
+By default, `mcp-k8s-up` also generates a **separate** read-only ServiceAccount kubeconfig for a remote triage agent and writes it to:
+- `./out/triage-readonly.kubeconfig`
+
+If your triage agent cannot reach the cluster API server at the same address as this node uses (common), pass an explicit apiserver URL:
+```bash
+./mcp-k8s-up \
+  --image "$IMAGE" \
+  --node-ip <WIREGUARD_NODE_IP> \
+  --triage-server https://<API_SERVER_HOST>:6443
+```
+
+To (re)generate only the triage kubeconfig:
+```bash
+./triage-creds-up --kubeconfig-out ./out/triage-readonly.kubeconfig
+```
+
+Preflight example:
+```bash
+KUBECONFIG=./out/triage-readonly.kubeconfig kubectl auth can-i get pods -A
+```
 
 ## Important knobs
 
@@ -77,6 +103,11 @@ Remove the Helm release and RBAC objects:
 Remove everything including the namespace:
 ```bash
 ./mcp-k8s-down --delete-namespace
+```
+
+Keep the triage kubeconfig file on disk (still removes triage SA/RBAC):
+```bash
+./mcp-k8s-down --keep-triage-file
 ```
 
 ## Test: trigger a CrashLoopBackOff notification

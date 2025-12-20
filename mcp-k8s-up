@@ -18,6 +18,9 @@ Options:
   --node-ip      Node IP (WireGuard-reachable) to print in the connection URL (recommended)
   --read-only    Set config.read_only=true (default: false)
   --no-wait      Do not wait for rollout/ready
+  --triage-creds Generate triage kubeconfig credentials (default: true)
+  --triage-kubeconfig-out  Output path for triage kubeconfig (default: ./out/triage-readonly.kubeconfig)
+  --triage-server Override Kubernetes API server URL in triage kubeconfig (default: from current kubectl context)
 
 Notes:
   - The upstream chart does not expose service.nodePort; we use service.type=NodePort and let Kubernetes auto-allocate a random nodePort.
@@ -33,6 +36,9 @@ log_level="2"
 node_ip=""
 read_only="false"
 wait="true"
+triage_creds="true"
+triage_kubeconfig_out="./out/triage-readonly.kubeconfig"
+triage_server=""
 
 image_ref=""
 
@@ -47,6 +53,9 @@ while [[ $# -gt 0 ]]; do
     --node-ip) node_ip="${2:-}"; shift 2 ;;
     --read-only) read_only="true"; shift 1 ;;
     --no-wait) wait="false"; shift 1 ;;
+    --triage-creds) triage_creds="${2:-true}"; shift 2 ;;
+    --triage-kubeconfig-out) triage_kubeconfig_out="${2:-}"; shift 2 ;;
+    --triage-server) triage_server="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -75,7 +84,7 @@ fi
 echo "[1/4] Apply namespace + RBAC"
 kubectl apply -f ./mcp-system-rbac.yaml >/dev/null
 
-echo "[2/4] Build Helm values override"
+echo "[2/5] Build Helm values override"
 tmp_values="$(mktemp -t mcp-values.XXXXXX.yaml)"
 trap 'rm -f "$tmp_values"' EXIT
 
@@ -124,14 +133,14 @@ config:
   disable_destructive: true
 EOF
 
-echo "[3/4] Helm deploy (${release} in ${namespace})"
+echo "[3/5] Helm deploy (${release} in ${namespace})"
 helm_args=(upgrade --install "$release" "$chart" -n "$namespace" --create-namespace -f "$tmp_values")
 if [[ "$wait" == "true" ]]; then
   helm_args+=(--wait --timeout 5m)
 fi
 helm "${helm_args[@]}" >/dev/null
 
-echo "[4/4] Print connection info"
+echo "[4/5] Print connection info"
 svc_name="$release"
 node_port="$(kubectl -n "$namespace" get svc "$svc_name" -o jsonpath='{.spec.ports[0].nodePort}')"
 
@@ -141,4 +150,16 @@ if [[ -n "$node_ip" ]]; then
   echo "Laptop URL (via WireGuard): http://${node_ip}:${node_port}"
 else
   echo "Provide --node-ip <wireguard-ip> to print the exact laptop URL."
+fi
+
+echo "[5/5] Generate triage credentials (optional)"
+if [[ "$triage_creds" == "true" ]]; then
+  triage_args=(--kubeconfig-out "$triage_kubeconfig_out")
+  if [[ -n "$triage_server" ]]; then
+    triage_args+=(--server "$triage_server")
+  fi
+  ./triage-creds-up "${triage_args[@]}" >/dev/null
+  echo "Triage kubeconfig: $triage_kubeconfig_out"
+else
+  echo "Skipped triage credential generation (--triage-creds false)"
 fi

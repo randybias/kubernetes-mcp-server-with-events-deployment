@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubernetes-triage-readonly
+  namespace: mcp-system
+---
+# Baseline cluster-wide read for common resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-triage-readonly-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-triage-readonly
+    namespace: mcp-system
+---
+# Extra reads needed for typical triage workflows.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubernetes-triage-readonly-extra
+rules:
+  # `kubectl logs` uses the `pods/log` subresource.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Needed for cluster-level fault analysis (and matches MCP "faults" mode needs).
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # Helm v3 release storage (broad for now; tighten later).
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-triage-readonly-extra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubernetes-triage-readonly-extra
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-triage-readonly
+    namespace: mcp-system
+
