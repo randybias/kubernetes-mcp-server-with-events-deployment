@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./mcp-k8s-down [options]
+
+Options:
+  --namespace         Namespace (default: mcp-system)
+  --release           Helm release name (default: kubernetes-mcp-server)
+  --delete-namespace  Also delete the namespace (default: false)
+
+Notes:
+  - Deletes Helm release, then deletes RBAC objects from ./mcp-system-rbac.yaml.
+EOF
+}
+
+namespace="mcp-system"
+release="kubernetes-mcp-server"
+delete_namespace="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --namespace) namespace="${2:-}"; shift 2 ;;
+    --release) release="${2:-}"; shift 2 ;;
+    --delete-namespace) delete_namespace="true"; shift 1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "kubectl not found in PATH" >&2
+  exit 1
+fi
+if ! command -v helm >/dev/null 2>&1; then
+  echo "helm not found in PATH" >&2
+  exit 1
+fi
+
+if [[ ! -f "./mcp-system-rbac.yaml" ]]; then
+  echo "Expected ./mcp-system-rbac.yaml next to this script" >&2
+  exit 1
+fi
+
+helm uninstall "$release" -n "$namespace" >/dev/null 2>&1 || true
+kubectl delete -f ./mcp-system-rbac.yaml --ignore-not-found >/dev/null
+
+if [[ "$delete_namespace" == "true" ]]; then
+  kubectl delete namespace "$namespace" --ignore-not-found >/dev/null
+fi
+
+echo "Torn down: release=${namespace}/${release}"
+

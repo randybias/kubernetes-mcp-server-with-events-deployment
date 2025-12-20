@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./mcp-k8s-up --image <registry>/<repo>:<tag> [options]
+
+Required:
+  --image        Container image reference to deploy (e.g., ghcr.io/myorg/kubernetes-mcp-server:dev-abc123)
+
+Options:
+  --namespace    Namespace to deploy into (default: mcp-system)
+  --release      Helm release name (default: kubernetes-mcp-server)
+  --chart        Helm chart reference (default: oci://ghcr.io/containers/charts/kubernetes-mcp-server)
+  --app-port     Container/service port (default: 8080)
+  --log-level    Server log_level in config.toml (default: 2)
+  --node-ip      Node IP (WireGuard-reachable) to print in the connection URL (recommended)
+  --read-only    Set config.read_only=true (default: false)
+  --no-wait      Do not wait for rollout/ready
+
+Notes:
+  - The upstream chart does not expose service.nodePort; we use service.type=NodePort and let Kubernetes auto-allocate a random nodePort.
+  - This script applies RBAC from ./mcp-system-rbac.yaml and uses the pre-created ServiceAccount.
+EOF
+}
+
+namespace="mcp-system"
+release="kubernetes-mcp-server"
+chart="oci://ghcr.io/containers/charts/kubernetes-mcp-server"
+app_port="8080"
+log_level="2"
+node_ip=""
+read_only="false"
+wait="true"
+
+image_ref=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --image) image_ref="${2:-}"; shift 2 ;;
+    --namespace) namespace="${2:-}"; shift 2 ;;
+    --release) release="${2:-}"; shift 2 ;;
+    --chart) chart="${2:-}"; shift 2 ;;
+    --app-port) app_port="${2:-}"; shift 2 ;;
+    --log-level) log_level="${2:-}"; shift 2 ;;
+    --node-ip) node_ip="${2:-}"; shift 2 ;;
+    --read-only) read_only="true"; shift 1 ;;
+    --no-wait) wait="false"; shift 1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+done
+
+if [[ -z "$image_ref" ]]; then
+  echo "Missing --image" >&2
+  usage
+  exit 2
+fi
+
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "kubectl not found in PATH" >&2
+  exit 1
+fi
+if ! command -v helm >/dev/null 2>&1; then
+  echo "helm not found in PATH" >&2
+  exit 1
+fi
+
+if [[ ! -f "./mcp-system-rbac.yaml" ]]; then
+  echo "Expected ./mcp-system-rbac.yaml next to this script" >&2
+  exit 1
+fi
+
+echo "[1/4] Apply namespace + RBAC"
+kubectl apply -f ./mcp-system-rbac.yaml >/dev/null
+
+echo "[2/4] Build Helm values override"
+tmp_values="$(mktemp -t mcp-values.XXXXXX.yaml)"
+trap 'rm -f "$tmp_values"' EXIT
+
+registry="${image_ref%%/*}"
+repo_and_tag="${image_ref#*/}"
+if [[ "$registry" == "$repo_and_tag" ]]; then
+  echo "Image must include a registry prefix (e.g., ghcr.io/org/repo:tag): $image_ref" >&2
+  exit 2
+fi
+
+repo="$repo_and_tag"
+version=""
+if [[ "$repo_and_tag" == *"@"* ]]; then
+  repo="${repo_and_tag%@*}"
+  version="${repo_and_tag#*@}"
+elif [[ "$repo_and_tag" == *":"* ]]; then
+  repo="${repo_and_tag%:*}"
+  version="${repo_and_tag##*:}"
+else
+  echo "Image must include a tag or digest (e.g., :dev or @sha256:...): $image_ref" >&2
+  exit 2
+fi
+
+cat >"$tmp_values" <<EOF
+serviceAccount:
+  create: false
+  name: kubernetes-mcp-server
+
+image:
+  registry: ${registry}
+  repository: ${repo}
+  version: ${version}
+  pullPolicy: IfNotPresent
+
+ingress:
+  enabled: false
+
+service:
+  type: NodePort
+  port: ${app_port}
+
+config:
+  port: "{{ .Values.service.port }}"
+  log_level: ${log_level}
+  read_only: ${read_only}
+  disable_destructive: true
+EOF
+
+echo "[3/4] Helm deploy (${release} in ${namespace})"
+helm_args=(upgrade --install "$release" "$chart" -n "$namespace" --create-namespace -f "$tmp_values")
+if [[ "$wait" == "true" ]]; then
+  helm_args+=(--wait --timeout 5m)
+fi
+helm "${helm_args[@]}" >/dev/null
+
+echo "[4/4] Print connection info"
+svc_name="$release"
+node_port="$(kubectl -n "$namespace" get svc "$svc_name" -o jsonpath='{.spec.ports[0].nodePort}')"
+
+echo "Service: ${namespace}/${svc_name}"
+echo "NodePort: ${node_port}"
+if [[ -n "$node_ip" ]]; then
+  echo "Laptop URL (via WireGuard): http://${node_ip}:${node_port}"
+else
+  echo "Provide --node-ip <wireguard-ip> to print the exact laptop URL."
+fi
