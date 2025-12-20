@@ -1,6 +1,8 @@
 # Deploy `kubernetes-mcp-server-with-events` on a k0s cluster
 
-This repo contains a minimal, repeatable way to deploy `ghcr.io/randybias/kubernetes-mcp-server-with-events` into a Kubernetes cluster (k0s tested) using the upstream Helm chart `oci://ghcr.io/containers/charts/kubernetes-mcp-server`.
+This repo contains a minimal, repeatable way to deploy **Randy’s fork** of `kubernetes-mcp-server` (the image `ghcr.io/randybias/kubernetes-mcp-server-with-events`) into a Kubernetes cluster (k0s tested) using the upstream Helm chart `oci://ghcr.io/containers/charts/kubernetes-mcp-server`.
+
+Important: the **event subscription/notification tooling** (`events_subscribe`, `mode: faults`, `notifications/message`, etc.) is provided by this forked image. If you deploy the upstream image instead, those event tools will not be present.
 
 It creates:
 - Namespace: `mcp-system`
@@ -64,7 +66,7 @@ The laptop-facing port remains the Service **NodePort** (auto-assigned and print
 This grants (broad for now):
 - `ClusterRoleBinding` to built-in `view` (cluster-wide read)
 - Helm release storage read: `secrets` and `configmaps` (`get/list/watch`) across all namespaces
-- Nodes read (`nodes get/list/watch`) required for `events_subscribe` with `mode: faults`
+- Nodes read (`nodes get/list/watch`) required for this fork’s `events_subscribe` with `mode: faults`
 
 ## Tear down
 Remove the Helm release and RBAC objects:
@@ -78,6 +80,8 @@ Remove everything including the namespace:
 ```
 
 ## Test: trigger a CrashLoopBackOff notification
+
+This test requires the forked image (`ghcr.io/randybias/kubernetes-mcp-server-with-events:*`) because upstream `kubernetes-mcp-server` does not include the event subscription tools.
 
 1) Subscribe in your MCP client:
 - Call `logging/setLevel` (e.g., `debug` or `warning`)
