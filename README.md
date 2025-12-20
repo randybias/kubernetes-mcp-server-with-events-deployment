@@ -133,3 +133,6 @@ You should receive a `notifications/message` with `faultType: CrashLoop`.
   - `kubectl auth can-i --as=system:serviceaccount:mcp-system:kubernetes-mcp-server list nodes`
 - Pod is CrashLooping: your internal server port doesn’t match `--app-port` (probes will fail).
 - You can reach `/healthz` but not MCP: make sure you’re using `/mcp` and the client keeps the receive stream open (streamable HTTP).
+
+## Image pull behavior
+This deployment sets `imagePullPolicy: Always` so that `:dev-latest` (or any other moving tag) is always refreshed on each pod start/restart.
