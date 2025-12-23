@@ -66,6 +66,11 @@ To (re)generate only the triage kubeconfig:
 ./triage-creds-up --kubeconfig-out ./out/triage-readonly.kubeconfig
 ```
 
+Verify the actual token lifetime embedded in the generated kubeconfig (apiserver policy may shorten the requested duration):
+```bash
+./triage-creds-info --kubeconfig ./out/triage-readonly.kubeconfig
+```
+
 Preflight example:
 ```bash
 KUBECONFIG=./out/triage-readonly.kubeconfig kubectl auth can-i get pods -A

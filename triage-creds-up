@@ -18,6 +18,7 @@ Options:
   --user-name        User name in generated kubeconfig (default: triage-readonly)
   --server           Kubernetes API server URL (default: current kubeconfig cluster server)
   --duration         Token duration for kubectl create token (default: 24h)
+  --show-expiration  Print the actual issued token TTL after minting (default: false)
   --print            Also print the kubeconfig to stdout
 
 Notes:
@@ -35,6 +36,7 @@ cluster_name=""
 user_name="triage-readonly"
 server=""
 duration="24h"
+show_expiration="false"
 print="false"
 
 while [[ $# -gt 0 ]]; do
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --user-name) user_name="${2:-}"; shift 2 ;;
     --server) server="${2:-}"; shift 2 ;;
     --duration) duration="${2:-}"; shift 2 ;;
+    --show-expiration) show_expiration="true"; shift 1 ;;
     --print) print="true"; shift 1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
@@ -106,6 +109,27 @@ if [[ -z "$token" ]]; then
   exit 1
 fi
 
+if [[ "$show_expiration" == "true" ]]; then
+  if [[ -x "./triage-creds-info" ]]; then
+    tmp_kubeconfig="$(mktemp -t triage-kubeconfig.XXXXXX)"
+    umask 077
+    cat >"$tmp_kubeconfig" <<EOF
+apiVersion: v1
+kind: Config
+users:
+- name: ${user_name}
+  user:
+    token: ${token}
+EOF
+    echo "Requested duration: ${duration}"
+    ./triage-creds-info --kubeconfig "$tmp_kubeconfig"
+    rm -f "$tmp_kubeconfig"
+  else
+    echo "Requested duration: ${duration}"
+    echo "Note: ./triage-creds-info not executable; cannot print token TTL." >&2
+  fi
+fi
+
 umask 077
 cat >"$kubeconfig_out" <<EOF
 apiVersion: v1
@@ -137,4 +161,3 @@ if [[ "$print" == "true" ]]; then
   echo "---"
   cat "$kubeconfig_out"
 fi
-
